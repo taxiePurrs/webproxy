@@ -214,13 +214,6 @@ const server = http.createServer((req, res) => {
     // --- ROOT DEFAULT DECOY PATH ---
     else {
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(<html>
-            <head>
-                <title>Sanoma Learning Portal</title>
-            </head>
-            <body style="margin:0;">
-                <iframe src="https://sanomalearning.com" style="width:100%; height:100vh; border:none;"></iframe>
-            </body>
-        </html>);
+        res.end(`<html><head><title>Sanoma Learning Portal</title></head><body style="margin:0;"><iframe src="https://sanomalearning.com" style="width:100%; height:100vh; border:none;"></iframe></body></html>`);
     }
 });
