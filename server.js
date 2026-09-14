@@ -9,10 +9,8 @@ const DB_FILE = path.join(__dirname, 'database.json');
 const SECRET_SALT = "gentoo_linux_6.18_crypto_salt_2026";
 const MAX_ATTEMPTS = 3;
 
-// Transient memory structure to log failed strike attempts before a hard-ban
 const failTracker = {};
 
-// Ensure our JSON flat-file database exists with proper root brackets
 if (!fs.existsSync(DB_FILE)) {
     fs.writeFileSync(DB_FILE, JSON.stringify({}, null, 4), 'utf-8');
 }
@@ -20,7 +18,6 @@ if (!fs.existsSync(DB_FILE)) {
 function readDB() { return JSON.parse(fs.readFileSync(DB_FILE, 'utf-8')); }
 function writeDB(data) { fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 4), 'utf-8'); }
 
-// Cryptographic engine to compute our moving 12-digit security token (updates every 30s)
 function getActive12DigitToken() {
     const timeBlock = Math.floor(Date.now() / 1000 / 30);
     const hash = crypto.createHmac('sha256', SECRET_SALT).update(timeBlock.toString()).digest('hex');
@@ -28,75 +25,33 @@ function getActive12DigitToken() {
 }
 
 const server = http.createServer((req, res) => {
-    // Construct a modern WHATWG URL object cleanly
     const hostHeader = req.headers.host || `localhost:${PORT}`;
     const parsedUrl = new URL(req.url, `http://${hostHeader}`);
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
-    // --- TEMPORARILY DISABLED GATEKEEPER PIPELINE ---
-    /*
-    if (parsedUrl.pathname === '/' && (parsedUrl.searchParams.has('sig') || parsedUrl.searchParams.has('otp'))) {
-        const incomingSignature = parsedUrl.searchParams.get('sig');
-        const clientDeviceID = parsedUrl.searchParams.get('id') || 'unknown';
-        const rawOtp = parsedUrl.searchParams.get('otp');
-
-        const fingerprint = crypto.createHash('sha256').update(`${clientIp}-${clientDeviceID}`).digest('hex');
-        const db = readDB();
-
-        if (!db[fingerprint]) {
-            db[fingerprint] = { isbanned: false, useserverdata: false };
-            writeDB(db);
-        }
-
-        if (db[fingerprint].isbanned) {
-            res.writeHead(200, { 'Content-Type': 'text/html' });
-            return res.end(`
-                <script>
-                    localStorage.clear();
-                    window.location.href = "https://sanomalearning.com";
-                </script>
-            `);
-        }
-
-        const currentCorrectOtp = getActive12DigitToken();
-        
-        let isValid = false;
-        if (rawOtp === currentCorrectOtp) {
-            isValid = true;
-        } else if (incomingSignature) {
-            const localCombinedString = `${currentCorrectOtp}|||${clientDeviceID}`;
-            const serverCalculatedSignature = crypto.createHash('sha256').update(localCombinedString).digest('hex');
-            if (incomingSignature === serverCalculatedSignature) isValid = true;
-        }
-
-        if (isValid) {
-            delete failTracker[fingerprint];
-            db[fingerprint].useserverdata = true; 
-            writeDB(db);
-
-            res.writeHead(200, { 'Content-Type': 'text/html' });
-            return res.end(`
-                <script>
-                    localStorage.setItem("session_verified", "true");
-                    localStorage.setItem("permanent_device_id", "${clientDeviceID}");
-                    window.location.href = "/dashboard";
-                </script>
-            `);
-        } else {
-            failTracker[fingerprint] = (failTracker[fingerprint] || 0) + 1;
-            if (failTracker[fingerprint] >= MAX_ATTEMPTS) {
-                db[fingerprint].isbanned = true;
-                db[fingerprint].useserverdata = false;
-                writeDB(db);
-                delete failTracker[fingerprint];
-                res.writeHead(200, { 'Content-Type': 'text/html' });
-                return res.end(`<script>localStorage.clear(); window.location.href="https://sanomalearning.com";</script>`);
-            }
-            res.writeHead(500);
-            return res.end("Authentication signature mismatch.");
-        }
+    // --- LOG COLLECTION ENDPOINT ---
+    if (parsedUrl.pathname === '/log' && req.method === 'POST') {
+        let logBody = [];
+        req.on('data', chunk => logBody.push(chunk));
+        req.on('end', () => {
+            try {
+                const logPayload = JSON.parse(Buffer.concat(logBody).toString('utf-8'));
+                const prefix = `[BROWSER ${logPayload.type.toUpperCase()}]`;
+                
+                // Color codes for the Linux terminal output
+                if (logPayload.type === 'error') {
+                    console.log(`\x1b[31%m${prefix} ${logPayload.message}\x1b[0m`);
+                } else if (logPayload.type === 'warn') {
+                    console.log(`\x1b[33%m${prefix} ${logPayload.message}\x1b[0m`);
+                } else {
+                    console.log(`${prefix} ${logPayload.message}`);
+                }
+            } catch (e) {}
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+            return res.end(JSON.stringify({ status: 'logged' }));
+        });
+        return;
     }
-    */
 
     // --- PROXY DATA PIPELINE ---
     if (parsedUrl.pathname === '/proxy' && parsedUrl.searchParams.has('url')) {
@@ -127,9 +82,9 @@ const server = http.createServer((req, res) => {
                     proxyRes.on('end', () => {
                         let contentString = Buffer.concat(bodyBuffer).toString('utf-8');
 
-                        // --- SERVER-SIDE REWRITER SYSTEM ---
                         const hostAddress = `http://${req.headers.host}`;
-                        const domainsToRewrite = ['roblox.com', '://roblox.com', '://roblox.com'];
+                        // Expanded domain definitions list to attempt to catch more paths
+                        const domainsToRewrite = ['roblox.com', '://roblox.com', '://roblox.com', 'rbxcdn.com', '://rbxcdn.com'];
                         
                         domainsToRewrite.forEach(domain => {
                             const rawUrlPattern = `https://${domain}`;
@@ -138,18 +93,43 @@ const server = http.createServer((req, res) => {
                         });
 
                         if (contentType.includes('text/html')) {
+                            // Injected script intercepts console behavior and pushes messages out over POST requests
                             const clientScriptHook = `
                                 <script>
-                                    document.addEventListener('click', function(e) {
-                                        const link = e.target.closest('a');
-                                        if (link && link.href && !link.href.includes(window.location.host)) {
-                                            e.preventDefault();
-                                            window.location.href = '/proxy?url=' + btoa(link.href);
+                                    (function() {
+                                        function sendTerminalLog(type, args) {
+                                            const msg = Array.from(args).map(v => typeof v === 'object' ? JSON.stringify(v) : v).join(' ');
+                                            fetch('/log', {
+                                                method: 'POST',
+                                                body: JSON.stringify({ type: type, message: msg }),
+                                                headers: { 'Content-Type': 'application/json' }
+                                            }).catch(() => {});
                                         }
-                                    }, true);
+
+                                        const _log = console.log;
+                                        const _warn = console.warn;
+                                        const _error = console.error;
+
+                                        console.log = function() { sendTerminalLog('log', arguments); _log.apply(console, arguments); };
+                                        console.warn = function() { sendTerminalLog('warn', arguments); _warn.apply(console, arguments); };
+                                        console.error = function() { sendTerminalLog('error', arguments); _error.apply(console, arguments); };
+
+                                        // Catch global unhandled script failures
+                                        window.addEventListener('error', function(e) {
+                                            sendTerminalLog('error', [e.message, 'at', e.filename, 'line:', e.lineno]);
+                                        });
+
+                                        document.addEventListener('click', function(e) {
+                                            const link = e.target.closest('a');
+                                            if (link && link.href && !link.href.includes(window.location.host)) {
+                                                e.preventDefault();
+                                                window.location.href = '/proxy?url=' + btoa(link.href);
+                                            }
+                                        }, true);
+                                    })();
                                 </script>
                             `;
-                            contentString = contentString.replace('</body>', `${clientScriptHook}</body>`);
+                            contentString = contentString.replace('<head>', `<head>${clientScriptHook}`);
                         }
 
                         res.writeHead(proxyRes.statusCode, proxyRes.headers);
@@ -173,7 +153,7 @@ const server = http.createServer((req, res) => {
             res.end("Invalid encoding schema payload.");
         }
     } 
-    // --- PRIVATE DASHBOARD HOOK ---
+    // --- DASHBOARD HOOK ---
     else if (parsedUrl.pathname === '/dashboard' || parsedUrl.pathname === '/') {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(`
@@ -200,9 +180,7 @@ const server = http.createServer((req, res) => {
             </body>
             </html>
         `);
-    }
-    // --- ROOT DEFAULT DECOY PATH (FALLBACK) ---
-    else {
+    } else {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(`
             <html>
