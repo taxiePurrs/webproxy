@@ -7,16 +7,12 @@ const PORT = 8080;
 const server = http.createServer((req, res) => {
     const parsedUrl = url.parse(req.url, true);
 
-    // Define the endpoint where the encoded URL is received
     if (parsedUrl.pathname === '/proxy' && parsedUrl.query.url) {
         try {
-            // Decode the Base64 URL parameter back to plaintext
             const decodedUrl = Buffer.from(parsedUrl.query.url, 'base64').toString('utf-8');
             console.log(`[PROXYING TARGET] -> ${decodedUrl}`);
 
             const target = url.parse(decodedUrl);
-            
-            // Choose the engine depending on http vs https protocol
             const clientEngine = target.protocol === 'https:' ? https : http;
 
             const proxyOptions = {
@@ -26,17 +22,42 @@ const server = http.createServer((req, res) => {
                 method: req.method,
                 headers: {
                     ...req.headers,
-                    host: target.hostname, // Crucial: tricks the target into accepting the request
+                    host: target.hostname,
                 }
             };
 
-            // Fetch the target website from the host network
             const proxyReq = clientEngine.request(proxyOptions, (proxyRes) => {
-                // Pass the original site response headers back to the browser
-                res.writeHead(proxyRes.statusCode, proxyRes.headers);
-                
-                // Straight stream pipeline for ALL data chunks (HTML, JS, CSS, Images, Icons)
-                proxyRes.pipe(res);
+                const contentType = proxyRes.headers['content-type'] || '';
+
+                // --- NEW LINK REWRITING ENGINE ---
+                // Only buffer and edit the text if the file is an actual HTML web page
+                if (contentType.includes('text/html')) {
+                    let chunks = [];
+                    
+                    proxyRes.on('data', (chunk) => {
+                        chunks.push(chunk);
+                    });
+
+                    proxyRes.on('end', () => {
+                        let htmlContent = Buffer.concat(chunks).toString('utf-8');
+
+                        // Dynamically grab whatever host URL your Codespace is running right now
+                        const proxyHost = `http://${req.headers.host}`;
+
+                        // Look for all common variations of roblox links and rewrite them into your base64 proxy format
+                        htmlContent = htmlContent.replaceAll('https://roblox.com', `${proxyHost}/proxy?url=${Buffer.from('https://roblox.com').toString('base64')}`);
+                        htmlContent = htmlContent.replaceAll('https://roblox.com', `${proxyHost}/proxy?url=${Buffer.from('https://roblox.com').toString('base64')}`);
+                        htmlContent = htmlContent.replaceAll('//www.roblox.com', `${proxyHost}/proxy?url=${Buffer.from('https://roblox.com').toString('base64')}`);
+
+                        // Send headers and the rewritten code straight to your Chromebook tab
+                        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+                        res.end(htmlContent);
+                    });
+                } else {
+                    // Fast pipeline: Stream images, scripts, styling sheets, and fonts directly
+                    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+                    proxyRes.pipe(res);
+                }
             });
 
             proxyReq.on('error', (err) => {
@@ -44,7 +65,6 @@ const server = http.createServer((req, res) => {
                 res.end(`Proxy connection failed: ${err.message}`);
             });
 
-            // Forward any client data body onward (like POST form submissions)
             req.pipe(proxyReq);
 
         } catch (error) {
@@ -52,7 +72,6 @@ const server = http.createServer((req, res) => {
             res.end("Invalid URL format.");
         }
     } else {
-        // Fallback: Serve the main panel dashboard layout view
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(`
             <h1>Local Development Sandbox</h1>
