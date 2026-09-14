@@ -1,24 +1,23 @@
 const http = require('http');
 const https = require('https');
-const url = require('url');
 
 const PORT = 8080;
 
 const server = http.createServer((req, res) => {
-    const parsedUrl = url.parse(req.url, true);
+    // Construct a modern WHATWG URL object cleanly to eliminate the deprecation warning
+    const hostHeader = req.headers.host || `localhost:${PORT}`;
+    const parsedUrl = new URL(req.url, `http://${hostHeader}`);
 
-    if (parsedUrl.pathname === '/proxy' && parsedUrl.query.url) {
+    if (parsedUrl.pathname === '/proxy' && parsedUrl.searchParams.has('url')) {
         try {
-            const decodedUrl = Buffer.from(parsedUrl.query.url, 'base64').toString('utf-8');
-            console.log(`[PROXYING TARGET] -> ${decodedUrl}`);
-
-            const target = url.parse(decodedUrl);
+            const decodedUrlStr = Buffer.from(parsedUrl.searchParams.get('url'), 'base64').toString('utf-8');
+            const target = new URL(decodedUrlStr);
             const clientEngine = target.protocol === 'https:' ? https : http;
 
             const proxyOptions = {
                 hostname: target.hostname,
                 port: target.port || (target.protocol === 'https:' ? 443 : 80),
-                path: target.path,
+                path: target.pathname + target.search,
                 method: req.method,
                 headers: {
                     ...req.headers,
@@ -26,56 +25,72 @@ const server = http.createServer((req, res) => {
                 }
             };
 
-            const proxyReq = clientEngine.request(proxyOptions, (proxyRes) => {
+            const proxyRequest = clientEngine.request(proxyOptions, (proxyRes) => {
                 const contentType = proxyRes.headers['content-type'] || '';
 
-                // --- NEW LINK REWRITING ENGINE ---
-                // Only buffer and edit the text if the file is an actual HTML web page
+                // Only buffer and inject code if it's the raw HTML web page framework
                 if (contentType.includes('text/html')) {
                     let chunks = [];
                     
-                    proxyRes.on('data', (chunk) => {
-                        chunks.push(chunk);
-                    });
-
+                    proxyRes.on('data', (chunk) => chunks.push(chunk));
                     proxyRes.on('end', () => {
                         let htmlContent = Buffer.concat(chunks).toString('utf-8');
 
-                        // Dynamically grab whatever host URL your Codespace is running right now
-                        const proxyHost = `http://${req.headers.host}`;
+                        // --- THE UNIVERSAL CLIENT INTERCEPTOR ---
+                        // This script hooks into the browser lifecycle and dynamically translates 
+                        // ALL clicks (absolute, relative, or domain-shifted) into proxy routes.
+                        const dynamicScriptHook = `
+                            <script>
+                                (function() {
+                                    document.addEventListener('click', function(event) {
+                                        const link = event.target.closest('a');
+                                        
+                                        // Catch valid links that aren't javascript triggers
+                                        if (link && link.href && !link.href.startsWith('javascript:')) {
+                                            
+                                            // Always check against window.location.host instead of a hardcoded string
+                                            if (!link.href.includes(window.location.host + '/proxy')) {
+                                                event.preventDefault();
+                                                
+                                                console.log("Proxy routing clicked link:", link.href);
+                                                window.location.href = '/proxy?url=' + btoa(link.href);
+                                            }
+                                        }
+                                    }, true); // 'true' forces our interceptor to execute first
+                                })();
+                            </script>
+                        `;
 
-                        // Look for all common variations of roblox links and rewrite them into your base64 proxy format
-                        htmlContent = htmlContent.replaceAll('https://roblox.com', `${proxyHost}/proxy?url=${Buffer.from('https://roblox.com').toString('base64')}`);
-                        htmlContent = htmlContent.replaceAll('https://roblox.com', `${proxyHost}/proxy?url=${Buffer.from('https://roblox.com').toString('base64')}`);
-                        htmlContent = htmlContent.replaceAll('//www.roblox.com', `${proxyHost}/proxy?url=${Buffer.from('https://roblox.com').toString('base64')}`);
+                        // Drop the script cleanly right at the top of the HTML header initialization tree
+                        htmlContent = htmlContent.replace('<head>', `<head>${dynamicScriptHook}`);
 
-                        // Send headers and the rewritten code straight to your Chromebook tab
                         res.writeHead(proxyRes.statusCode, proxyRes.headers);
                         res.end(htmlContent);
                     });
                 } else {
-                    // Fast pipeline: Stream images, scripts, styling sheets, and fonts directly
+                    // Straight stream pipeline for images, styles, player assets, and sound files
                     res.writeHead(proxyRes.statusCode, proxyRes.headers);
                     proxyRes.pipe(res);
                 }
             });
 
-            proxyReq.on('error', (err) => {
+            proxyRequest.on('error', (err) => {
                 res.writeHead(500);
                 res.end(`Proxy connection failed: ${err.message}`);
             });
 
-            req.pipe(proxyReq);
+            req.pipe(proxyRequest);
 
         } catch (error) {
             res.writeHead(400);
-            res.end("Invalid URL format.");
+            res.end("Invalid target URL encoding format.");
         }
-    } else {
+    } else if (parsedUrl.pathname === '/' || parsedUrl.pathname === '/dashboard') {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(`
             <h1>Local Development Sandbox</h1>
-            <input type="text" id="target" value="https://roblox.com" placeholder="Enter full URL">
+            <p>Warning-Free Modern URL Standard Core Engaged.</p>
+            <input type="text" id="target" value="https://www.roblox.com" placeholder="Enter full URL">
             <button onclick="go()">Browse</button>
             <script>
                 function go() {
@@ -84,6 +99,9 @@ const server = http.createServer((req, res) => {
                 }
             </script>
         `);
+    } else {
+        res.writeHead(404);
+        res.end("Resource not found.");
     }
 });
 
