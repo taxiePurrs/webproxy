@@ -1,23 +1,24 @@
 const http = require('http');
 const https = require('https');
+const url = require('url');
 
 const PORT = 8080;
 
 const server = http.createServer((req, res) => {
-    // Construct a modern WHATWG URL object cleanly to eliminate the deprecation warning
-    const hostHeader = req.headers.host || `localhost:${PORT}`;
-    const parsedUrl = new URL(req.url, `http://${hostHeader}`);
+    const parsedUrl = url.parse(req.url, true);
 
-    if (parsedUrl.pathname === '/proxy' && parsedUrl.searchParams.has('url')) {
+    if (parsedUrl.pathname === '/proxy' && parsedUrl.query.url) {
         try {
-            const decodedUrlStr = Buffer.from(parsedUrl.searchParams.get('url'), 'base64').toString('utf-8');
-            const target = new URL(decodedUrlStr);
+            const decodedUrl = Buffer.from(parsedUrl.query.url, 'base64').toString('utf-8');
+            console.log(`[PROXYING TARGET] -> ${decodedUrl}`);
+
+            const target = url.parse(decodedUrl);
             const clientEngine = target.protocol === 'https:' ? https : http;
 
             const proxyOptions = {
                 hostname: target.hostname,
                 port: target.port || (target.protocol === 'https:' ? 443 : 80),
-                path: target.pathname + target.search,
+                path: target.path,
                 method: req.method,
                 headers: {
                     ...req.headers,
@@ -25,71 +26,76 @@ const server = http.createServer((req, res) => {
                 }
             };
 
-            const proxyRequest = clientEngine.request(proxyOptions, (proxyRes) => {
+            // Remove headers that might mess with our backend calculations
+            delete proxyOptions.headers['if-none-match'];
+            delete proxyOptions.headers['if-modified-since'];
+
+            const proxyReq = clientEngine.request(proxyOptions, (proxyRes) => {
                 const contentType = proxyRes.headers['content-type'] || '';
 
-                // Only buffer and inject code if it's the raw HTML web page framework
+                // --- THE CRITICAL FIX: STRIP ROBLOX SECURITY HEADERS ---
+                // We clone the original headers but delete the security policies
+                const cleanHeaders = { ...proxyRes.headers };
+                delete cleanHeaders['content-security-policy'];
+                delete cleanHeaders['content-security-policy-report-only'];
+                delete cleanHeaders['strict-transport-security']; // Stops HSTS forcing real https://
+                delete cleanHeaders['x-frame-options']; // Allows embedding
+
                 if (contentType.includes('text/html')) {
                     let chunks = [];
-                    
                     proxyRes.on('data', (chunk) => chunks.push(chunk));
                     proxyRes.on('end', () => {
                         let htmlContent = Buffer.concat(chunks).toString('utf-8');
 
-                        // --- THE UNIVERSAL CLIENT INTERCEPTOR ---
-                        // This script hooks into the browser lifecycle and dynamically translates 
-                        // ALL clicks (absolute, relative, or domain-shifted) into proxy routes.
+                        // This client script handles intercepting clicks smoothly
                         const dynamicScriptHook = `
                             <script>
                                 (function() {
                                     document.addEventListener('click', function(event) {
                                         const link = event.target.closest('a');
-                                        
-                                        // Catch valid links that aren't javascript triggers
-                                        if (link && link.href && !link.href.startsWith('javascript:')) {
+                                        if (link && link.href) {
+                                            // Ignore empty javascript buttons
+                                            if (link.href.startsWith('javascript:') || link.getAttribute('href') === '#') return;
+
+                                            event.preventDefault();
                                             
-                                            // Always check against window.location.host instead of a hardcoded string
-                                            if (!link.href.includes(window.location.host + '/proxy')) {
-                                                event.preventDefault();
-                                                
-                                                console.log("Proxy routing clicked link:", link.href);
-                                                window.location.href = '/proxy?url=' + btoa(link.href);
-                                            }
+                                            // Handle relative paths accurately by fetching the computed absolute property
+                                            const targetDestination = link.href; 
+                                            window.location.href = '/proxy?url=' + btoa(targetDestination);
                                         }
-                                    }, true); // 'true' forces our interceptor to execute first
+                                    }, true);
                                 })();
                             </script>
                         `;
 
-                        // Drop the script cleanly right at the top of the HTML header initialization tree
+                        // Drop the browser script cleanly inside the page head block
                         htmlContent = htmlContent.replace('<head>', `<head>${dynamicScriptHook}`);
 
-                        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+                        res.writeHead(proxyRes.statusCode, cleanHeaders);
                         res.end(htmlContent);
                     });
                 } else {
-                    // Straight stream pipeline for images, styles, player assets, and sound files
-                    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+                    // Straight stream pipeline for your working images and secondary media files
+                    res.writeHead(proxyRes.statusCode, cleanHeaders);
                     proxyRes.pipe(res);
                 }
             });
 
-            proxyRequest.on('error', (err) => {
+            proxyReq.on('error', (err) => {
                 res.writeHead(500);
                 res.end(`Proxy connection failed: ${err.message}`);
             });
 
-            req.pipe(proxyRequest);
+            req.pipe(proxyReq);
 
         } catch (error) {
             res.writeHead(400);
-            res.end("Invalid target URL encoding format.");
+            res.end("Invalid URL format.");
         }
-    } else if (parsedUrl.pathname === '/' || parsedUrl.pathname === '/dashboard') {
+    } else {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(`
             <h1>Local Development Sandbox</h1>
-            <p>Warning-Free Modern URL Standard Core Engaged.</p>
             <input type="text" id="target" value="https://www.roblox.com" placeholder="Enter full URL">
             <button onclick="go()">Browse</button>
             <script>
@@ -99,9 +105,6 @@ const server = http.createServer((req, res) => {
                 }
             </script>
         `);
-    } else {
-        res.writeHead(404);
-        res.end("Resource not found.");
     }
 });
 
