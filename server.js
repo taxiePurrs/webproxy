@@ -1,37 +1,39 @@
 const http = require('http');
 const https = require('https');
-const url = require('url');
 
 const PORT = 8080;
 
 const server = http.createServer((req, res) => {
-    const parsedUrl = url.parse(req.url, true);
+    // Construct a modern WHATWG URL object cleanly to eliminate the deprecation warning
+    const hostHeader = req.headers.host || `localhost:${PORT}`;
+    const parsedUrl = new URL(req.url, `http://${hostHeader}`);
 
-    if (parsedUrl.pathname === '/proxy' && parsedUrl.query.url) {
+    if (parsedUrl.pathname === '/proxy' && parsedUrl.searchParams.has('url')) {
         try {
-            const decodedUrl = Buffer.from(parsedUrl.query.url, 'base64').toString('utf-8');
-            console.log(`[PROXYING TARGET] -> ${decodedUrl}`);
-
-            const target = url.parse(decodedUrl);
+            const decodedUrlStr = Buffer.from(parsedUrl.searchParams.get('url'), 'base64').toString('utf-8');
+            const target = new URL(decodedUrlStr);
             const clientEngine = target.protocol === 'https:' ? https : http;
 
             const proxyOptions = {
                 hostname: target.hostname,
                 port: target.port || (target.protocol === 'https:' ? 443 : 80),
-                path: target.path,
+                path: target.pathname + target.search,
                 method: req.method,
                 headers: {
                     ...req.headers,
                     host: target.hostname,
-                    // Forces raw plaintext code so our text replacements don't corrupt binary chunks
-                    'accept-encoding': 'identity' 
+                    'accept-encoding': 'identity' // Forces raw plaintext text code
                 }
             };
 
-            const proxyReq = clientEngine.request(proxyOptions, (proxyRes) => {
+            // Clear caching parameters that might interfere with our injections
+            delete proxyOptions.headers['if-none-match'];
+            delete proxyOptions.headers['if-modified-since'];
+
+            const proxyRequest = clientEngine.request(proxyOptions, (proxyRes) => {
                 const contentType = proxyRes.headers['content-type'] || '';
 
-                // Clone headers and strip Content Security Policies so our rewrites are accepted by Chrome
+                // Clone headers and remove security locks so ChromeOS allows our injected hooks to run
                 const cleanHeaders = { ...proxyRes.headers };
                 delete cleanHeaders['content-security-policy'];
                 delete cleanHeaders['content-security-policy-report-only'];
@@ -40,51 +42,87 @@ const server = http.createServer((req, res) => {
 
                 if (contentType.includes('text/html')) {
                     let chunks = [];
-                    
-                    proxyRes.on('data', (chunk) => {
-                        chunks.push(chunk);
-                    });
-
+                    proxyRes.on('data', (chunk) => chunks.push(chunk));
                     proxyRes.on('end', () => {
                         let htmlContent = Buffer.concat(chunks).toString('utf-8');
-                        const proxyHost = `http://${req.headers.host}`;
 
-                        // 1. REWRITE ABSOLUTE LINKS (e.g., https://roblox.com)
-                        htmlContent = htmlContent.replaceAll('https://www.roblox.com', `${proxyHost}/proxy?url=${Buffer.from('https://www.roblox.com').toString('base64')}`);
-                        htmlContent = htmlContent.replaceAll('https://roblox.com', `${proxyHost}/proxy?url=${Buffer.from('https://roblox.com').toString('base64')}`);
+                        // --- THE ADVANCED MONKEY PATCH ROUTER ---
+                        // We hijack the browser's History API so that when Roblox's internal 
+                        // JavaScript framework attempts to change pages, it gets forced into our proxy.
+                        const coreRouterPatch = `
+                            <script>
+                                (function() {
+                                    const proxyOrigin = window.location.origin;
 
-                        // 2. REWRITE ROOT-RELATIVE LINKS (e.g., href="/login" becomes href="http://codespace/proxy?url=base64(https://roblox.com)")
-                        // We intercept the href="/ string and prefix it with our proxy address pointing directly back to roblox
-                        const baseProxyPath = `${proxyHost}/proxy?url=${Buffer.from('https://www.roblox.com').toString('base64')}`;
-                        htmlContent = htmlContent.replaceAll('href="/', `href="${baseProxyPath}/`);
-                        htmlContent = htmlContent.replaceAll('src="/', `src="${baseProxyPath}/`);
+                                    function interceptUrl(rawUrl) {
+                                        if (!rawUrl) return rawUrl;
+                                        try {
+                                            // Compute relative paths dynamically into absolute paths based on where we are
+                                            const resolvedAbsoluteUrl = new URL(rawUrl, window.location.href).href;
+                                            
+                                            // If it's already a proxy address, let it pass
+                                            if (resolvedAbsoluteUrl.includes(window.location.host + '/proxy')) return resolvedAbsoluteUrl;
+                                            
+                                            // Wrap it back into our base64 proxy tunnel pattern
+                                            return proxyOrigin + '/proxy?url=' + btoa(resolvedAbsoluteUrl);
+                                        } catch(e) {
+                                            return rawUrl;
+                                        }
+                                    }
+
+                                    // 1. Intercept the browser's dynamic SPA history hooks
+                                    const originalPushState = history.pushState;
+                                    const originalReplaceState = history.replaceState;
+
+                                    history.pushState = function(state, title, url) {
+                                        return originalPushState.apply(this, [state, title, interceptUrl(url)]);
+                                    };
+
+                                    history.replaceState = function(state, title, url) {
+                                        return originalReplaceState.apply(this, [state, title, interceptUrl(url)]);
+                                    };
+
+                                    // 2. Global background click tap for catching any basic link components
+                                    document.addEventListener('click', function(event) {
+                                        const link = event.target.closest('a');
+                                        if (link && link.href) {
+                                            if (link.href.startsWith('javascript:') || link.getAttribute('href') === '#') return;
+                                            event.preventDefault();
+                                            window.location.href = interceptUrl(link.href);
+                                        }
+                                    }, true);
+                                })();
+                            </script>
+                        `;
+
+                        // Inject the script at the absolute top of the <head> block before any Roblox code runs
+                        htmlContent = htmlContent.replace('<head>', `<head>${coreRouterPatch}`);
 
                         res.writeHead(proxyRes.statusCode, cleanHeaders);
                         res.end(htmlContent);
                     });
                 } else {
-                    // Straight stream pipeline for images, avatar assets, and stylesheets
                     res.writeHead(proxyRes.statusCode, cleanHeaders);
                     proxyRes.pipe(res);
                 }
             });
 
-            proxyReq.on('error', (err) => {
+            proxyRequest.on('error', (err) => {
                 res.writeHead(500);
                 res.end(`Proxy connection failed: ${err.message}`);
             });
 
-            req.pipe(proxyReq);
+            req.pipe(proxyRequest);
 
         } catch (error) {
             res.writeHead(400);
-            res.end("Invalid URL format.");
+            res.end("Invalid target URL encoding.");
         }
-    } else {
+    } else if (parsedUrl.pathname === '/' || parsedUrl.pathname === '/dashboard') {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(`
             <h1>Local Development Sandbox</h1>
-            <input type="text" id="target" value="https://www.roblox.com" placeholder="Enter full URL">
+            <input type="text" id="target" value="https://www.roblox.com" style="width:300px;">
             <button onclick="go()">Browse</button>
             <script>
                 function go() {
@@ -93,7 +131,10 @@ const server = http.createServer((req, res) => {
                 }
             </script>
         `);
+    } else {
+        res.writeHead(404);
+        res.end("Resource not found.");
     }
 });
 
-server.listen(PORT, () => console.log(`Proxy from scratch listening on port ${PORT}`));
+server.listen(PORT, () => console.log(`Proxy running with history manipulation on port ${PORT}`));
