@@ -217,3 +217,5 @@ const server = http.createServer((req, res) => {
         res.end(`<html><head><title>Sanoma Learning Portal</title></head><body style="margin:0;"><iframe src="https://sanomalearning.com" style="width:100%; height:100vh; border:none;"></iframe></body></html>`);
     }
 });
+
+server.listen(PORT, () => console.log("[SYS ENGINE] Proxy node actively processing traffic on port ${PORT}"));
