@@ -4,7 +4,7 @@ const https = require('https');
 const PORT = 8080;
 
 const server = http.createServer((req, res) => {
-    // 1. Hook up the log parsing endpoint to stream console logs to terminal
+    // 1. Log parsing endpoint to stream console logs to terminal
     if (req.url === '/log' && req.method === 'POST') {
         let body = [];
         req.on('data', chunk => body.push(chunk));
@@ -27,10 +27,9 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // Handle incoming proxy requests
+    // 2. Handle incoming proxy requests
     if (req.url.startsWith('/proxy')) {
         try {
-            // Robust parsing of the base64 URL parameter
             const queryIndex = req.url.indexOf('?url=');
             if (queryIndex === -1) {
                 res.writeHead(400);
@@ -41,7 +40,6 @@ const server = http.createServer((req, res) => {
             
             console.log(`[PROXYING TARGET] -> ${decodedUrl}`);
 
-            // Parse destination settings using modern WHATWG API internally without warnings
             const target = new URL(decodedUrl);
             const clientEngine = target.protocol === 'https:' ? https : http;
 
@@ -66,10 +64,11 @@ const server = http.createServer((req, res) => {
                     proxyRes.on('end', () => {
                         let htmlContent = Buffer.concat(bodyBuffer).toString('utf-8');
 
-                        // Injection engine captures client console events and pipes them to the backend server terminal
-                        const loggerScript = `
+                        // This script intercepts console events AND overrides all link elements on load
+                        const proxyScriptHook = `
                             <script>
                                 (function() {
+                                    // Live Terminal Logging Engine
                                     function sendLog(type, args) {
                                         const msg = Array.from(args).map(v => typeof v === 'object' ? JSON.stringify(v) : v).join(' ');
                                         fetch('/log', {
@@ -81,7 +80,6 @@ const server = http.createServer((req, res) => {
 
                                     const _warn = console.warn;
                                     const _error = console.error;
-
                                     console.warn = function() { sendLog('warn', arguments); _warn.apply(console, arguments); };
                                     console.error = function() { sendLog('error', arguments); _error.apply(console, arguments); };
 
@@ -89,10 +87,30 @@ const server = http.createServer((req, res) => {
                                         sendLog('error', [e.message, 'at', e.filename, 'line:', e.lineno]);
                                     });
 
-                                    // Intercept direct clicks to stop pages from leaving your proxy tab container
+                                    // --- THE ONLOAD LINK REWRITER ---
+                                    window.addEventListener('load', function() {
+                                        const links = document.querySelectorAll('a');
+                                        const currentProxyHost = window.location.origin; // Automatically gets your Codespace URL
+                                        
+                                        links.forEach(link => {
+                                            // Check if the link exists and doesn't already point to your proxy
+                                            if (link.href && !link.href.includes(window.location.host) && !link.href.startsWith('javascript:')) {
+                                                const originalDestination = link.href;
+                                                
+                                                // Convert the absolute link destination to Base64
+                                                const obfuscatedUrl = btoa(originalDestination);
+                                                
+                                                // Rewrite the literal href tag on the fly
+                                                link.href = currentProxyHost + '/proxy?url=' + obfuscatedUrl;
+                                            }
+                                        });
+                                        sendLog('log', ['Successfully rewrote ' + links.length + ' links on the client side!']);
+                                    });
+
+                                    // Fallback backup: Intercept clicks just in case new links are injected by scripts later
                                     document.addEventListener('click', function(e) {
                                         const link = e.target.closest('a');
-                                        if (link && link.href && !link.href.includes(window.location.host)) {
+                                        if (link && link.href && !link.href.includes(window.location.host) && !link.href.startsWith('javascript:')) {
                                             e.preventDefault();
                                             window.location.href = '/proxy?url=' + btoa(link.href);
                                         }
@@ -101,14 +119,14 @@ const server = http.createServer((req, res) => {
                             </script>
                         `;
 
-                        // Drop the telemetry script cleanly inside the page head block
-                        htmlContent = htmlContent.replace('<head>', `<head>${loggerScript}`);
+                        // Drop the script into the page head block
+                        htmlContent = htmlContent.replace('<head>', `<head>${proxyScriptHook}`);
                         
                         res.writeHead(proxyRes.statusCode, proxyRes.headers);
                         res.end(htmlContent);
                     });
                 } else {
-                    // Straight streaming pipeline for assets, images, icons (how the first version did it)
+                    // Straight streaming pipeline for assets, images, icons, and fonts
                     res.writeHead(proxyRes.statusCode, proxyRes.headers);
                     proxyRes.pipe(res);
                 }
@@ -126,7 +144,7 @@ const server = http.createServer((req, res) => {
             res.end("Malformed target tracking payload.");
         }
     } else {
-        // Fallback layout dashboard screen view
+        // Fallback main panel dashboard layout view
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(`
             <h1>Local Development Sandbox</h1>
