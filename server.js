@@ -1,6 +1,5 @@
 const http = require('http');
 const https = require('https');
-const url = require('url');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -29,15 +28,17 @@ function getActive12DigitToken() {
 }
 
 const server = http.createServer((req, res) => {
-    const parsedUrl = url.parse(req.url, true);
+    // Construct a modern WHATWG URL object cleanly
+    const hostHeader = req.headers.host || `localhost:${PORT}`;
+    const parsedUrl = new URL(req.url, `http://${hostHeader}`);
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
     // --- TEMPORARILY DISABLED GATEKEEPER PIPELINE ---
     /*
-    if (parsedUrl.pathname === '/' && (req.url.includes('?sig=') || req.url.includes('?otp='))) {
-        const incomingSignature = parsedUrl.query.sig;
-        const clientDeviceID = parsedUrl.query.id || 'unknown';
-        const rawOtp = parsedUrl.query.otp;
+    if (parsedUrl.pathname === '/' && (parsedUrl.searchParams.has('sig') || parsedUrl.searchParams.has('otp'))) {
+        const incomingSignature = parsedUrl.searchParams.get('sig');
+        const clientDeviceID = parsedUrl.searchParams.get('id') || 'unknown';
+        const rawOtp = parsedUrl.searchParams.get('otp');
 
         const fingerprint = crypto.createHash('sha256').update(`${clientIp}-${clientDeviceID}`).digest('hex');
         const db = readDB();
@@ -98,16 +99,16 @@ const server = http.createServer((req, res) => {
     */
 
     // --- PROXY DATA PIPELINE ---
-    if (parsedUrl.pathname === '/proxy' && parsedUrl.query.url) {
+    if (parsedUrl.pathname === '/proxy' && parsedUrl.searchParams.has('url')) {
         try {
-            const decodedUrl = Buffer.from(parsedUrl.query.url, 'base64').toString('utf-8');
-            const target = url.parse(decodedUrl);
+            const decodedUrlStr = Buffer.from(parsedUrl.searchParams.get('url'), 'base64').toString('utf-8');
+            const target = new URL(decodedUrlStr);
             const clientEngine = target.protocol === 'https:' ? https : http;
 
             const proxyOptions = {
                 hostname: target.hostname,
                 port: target.port || (target.protocol === 'https:' ? 443 : 80),
-                path: target.path,
+                path: target.pathname + target.search,
                 method: req.method,
                 headers: {
                     ...req.headers,
@@ -174,7 +175,6 @@ const server = http.createServer((req, res) => {
     } 
     // --- PRIVATE DASHBOARD HOOK ---
     else if (parsedUrl.pathname === '/dashboard' || parsedUrl.pathname === '/') {
-        // We catch "/" here as well now so you don't default to the decoy while testing
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(`
             <html>
