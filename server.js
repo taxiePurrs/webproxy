@@ -32,8 +32,8 @@ const server = http.createServer((req, res) => {
     const parsedUrl = url.parse(req.url, true);
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
-    // --- GATEKEEPER PIPELINE ---
-    // Handle the cryptographic credential handshake check
+    // --- TEMPORARILY DISABLED GATEKEEPER PIPELINE ---
+    /*
     if (parsedUrl.pathname === '/' && (req.url.includes('?sig=') || req.url.includes('?otp='))) {
         const incomingSignature = parsedUrl.query.sig;
         const clientDeviceID = parsedUrl.query.id || 'unknown';
@@ -42,13 +42,11 @@ const server = http.createServer((req, res) => {
         const fingerprint = crypto.createHash('sha256').update(`${clientIp}-${clientDeviceID}`).digest('hex');
         const db = readDB();
 
-        // 1. Initialize user footprint if completely new
         if (!db[fingerprint]) {
             db[fingerprint] = { isbanned: false, useserverdata: false };
             writeDB(db);
         }
 
-        // 2. Reject if banned (Poison Pill Eviction)
         if (db[fingerprint].isbanned) {
             res.writeHead(200, { 'Content-Type': 'text/html' });
             return res.end(`
@@ -61,7 +59,6 @@ const server = http.createServer((req, res) => {
 
         const currentCorrectOtp = getActive12DigitToken();
         
-        // Handle immediate raw parameter compilation fallback if they didn't hash client side yet
         let isValid = false;
         if (rawOtp === currentCorrectOtp) {
             isValid = true;
@@ -71,10 +68,9 @@ const server = http.createServer((req, res) => {
             if (incomingSignature === serverCalculatedSignature) isValid = true;
         }
 
-        // 3. Process Authentication Result
         if (isValid) {
             delete failTracker[fingerprint];
-            db[fingerprint].useserverdata = true; // Elevate node privilege
+            db[fingerprint].useserverdata = true; 
             writeDB(db);
 
             res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -86,7 +82,6 @@ const server = http.createServer((req, res) => {
                 </script>
             `);
         } else {
-            // Log strikes for faulty validation payloads
             failTracker[fingerprint] = (failTracker[fingerprint] || 0) + 1;
             if (failTracker[fingerprint] >= MAX_ATTEMPTS) {
                 db[fingerprint].isbanned = true;
@@ -100,6 +95,7 @@ const server = http.createServer((req, res) => {
             return res.end("Authentication signature mismatch.");
         }
     }
+    */
 
     // --- PROXY DATA PIPELINE ---
     if (parsedUrl.pathname === '/proxy' && parsedUrl.query.url) {
@@ -123,7 +119,6 @@ const server = http.createServer((req, res) => {
             const proxyReq = clientEngine.request(proxyOptions, (proxyRes) => {
                 const contentType = proxyRes.headers['content-type'] || '';
                 
-                // If the response is basic text/html data, we buffer it to rewrite paths
                 if (contentType.includes('text/html') || contentType.includes('application/javascript')) {
                     let bodyBuffer = [];
 
@@ -132,20 +127,15 @@ const server = http.createServer((req, res) => {
                         let contentString = Buffer.concat(bodyBuffer).toString('utf-8');
 
                         // --- SERVER-SIDE REWRITER SYSTEM ---
-                        // Automatically intercept literal links and bind them back into our Base64 engine
                         const hostAddress = `http://${req.headers.host}`;
-                        
-                        // Target domain match strings (Expand this list as needed)
                         const domainsToRewrite = ['roblox.com', '://roblox.com', '://roblox.com'];
                         
                         domainsToRewrite.forEach(domain => {
                             const rawUrlPattern = `https://${domain}`;
-                            // This regex replaces instances of the domain links inside href or src values
                             const regex = new RegExp(rawUrlPattern, 'g');
                             contentString = contentString.replace(regex, `${hostAddress}/proxy?url=${Buffer.from(rawUrlPattern).toString('base64')}`);
                         });
 
-                        // Inject an inline client-side hook as a backup layer to catch dynamic javascript clicks
                         if (contentType.includes('text/html')) {
                             const clientScriptHook = `
                                 <script>
@@ -165,7 +155,6 @@ const server = http.createServer((req, res) => {
                         res.end(contentString);
                     });
                 } else {
-                    // Fast pipeline piping for non-text components (images, audio channels, icons)
                     res.writeHead(proxyRes.statusCode, proxyRes.headers);
                     proxyRes.pipe(res);
                 }
@@ -184,7 +173,8 @@ const server = http.createServer((req, res) => {
         }
     } 
     // --- PRIVATE DASHBOARD HOOK ---
-    else if (parsedUrl.pathname === '/dashboard') {
+    else if (parsedUrl.pathname === '/dashboard' || parsedUrl.pathname === '/') {
+        // We catch "/" here as well now so you don't default to the decoy while testing
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(`
             <html>
@@ -198,7 +188,7 @@ const server = http.createServer((req, res) => {
             </head>
             <body>
                 <h1>Proxy Operational Node Dashboard</h1>
-                <p>Gentoo Data pipeline verification complete.</p>
+                <p>Gentoo Data pipeline verification complete. (Auth Bypass Mode Active)</p>
                 <input type="text" id="target" placeholder="Enter target site URL (e.g., https://://roblox.com)">
                 <button onclick="launch()">Connect</button>
                 <script>
@@ -211,11 +201,16 @@ const server = http.createServer((req, res) => {
             </html>
         `);
     }
-    // --- ROOT DEFAULT DECOY PATH ---
+    // --- ROOT DEFAULT DECOY PATH (FALLBACK) ---
     else {
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(`<html><head><title>Sanoma Learning Portal</title></head><body style="margin:0;"><iframe src="https://sanomalearning.com" style="width:100%; height:100vh; border:none;"></iframe></body></html>`);
+        res.end(`
+            <html>
+            <head><title>Sanoma Learning Portal</title></head>
+            <body style="margin:0;"><iframe src="https://sanomalearning.com" style="width:100%; height:100vh; border:none;"></iframe></body>
+            </html>
+        `);
     }
 });
 
-server.listen(PORT, () => console.log("[SYS ENGINE] Proxy node actively processing traffic on port ${PORT}"));
+server.listen(PORT, () => console.log(`[SYS ENGINE] Proxy node actively processing traffic on port ${PORT}`));
